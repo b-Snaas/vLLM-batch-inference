@@ -19,7 +19,6 @@ async def send_request_with_retry(session, request: ChatCompletionRequest):
         if resp.status == 200:
             return resp
 
-        # Check for context length error and retry if needed
         if resp.status == 400:
             error_details = await resp.json()
             if "too long" in error_details.get("message", ""):
