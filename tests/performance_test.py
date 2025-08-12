@@ -3,6 +3,7 @@ import aiohttp
 import time
 import os
 import json
+import statistics
 
 API_BASE_URL = "http://127.0.0.1:3000"
 API_KEY = "123"
@@ -61,8 +62,14 @@ async def monitor_batch_status(session: aiohttp.ClientSession, batch_id: str):
                 print(f"   - Batch status: {status} (Elapsed: {time.time() - start_time:.2f}s)")
                 if status in ["completed", "failed", "cancelled"]:
                     end_time = time.time()
+                    processing_time = end_time - start_time
+                    completed_requests = batch_info['request_counts']['completed']
+                    
                     print(f"   - Batch finished with status: {status}")
-                    print(f"   - Total batch processing time: {end_time - start_time:.2f} seconds")
+                    print(f"   - Total batch processing time: {processing_time:.2f} seconds")
+                    if processing_time > 0 and completed_requests > 0:
+                        throughput = completed_requests / processing_time
+                        print(f"   - Batch throughput: {throughput:.2f} req/s")
                     print(f"   - Request counts: {batch_info['request_counts']}")
                     break
             else:
@@ -70,58 +77,158 @@ async def monitor_batch_status(session: aiohttp.ClientSession, batch_id: str):
                 break
         await asyncio.sleep(5)
 
-async def run_single_completions(session: aiohttp.ClientSession, stop_event: asyncio.Event):
-    """Continuously sends single chat completion requests."""
-    print("4. Running single-user completions on the side...")
-    latencies = []
+async def single_request_worker(session: aiohttp.ClientSession, stop_event: asyncio.Event, results: dict):
+    """A worker that continuously sends single chat completion requests."""
     payload = {
         "model": "qwen3-4b",
         "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 50
+        "max_tokens": 50,
+        "stream": True
     }
     
     while not stop_event.is_set():
         start_time = time.time()
+        ttft = -1
         try:
             async with session.post(f"{API_BASE_URL}/v1/chat/completions", json=payload, headers=HEADERS) as resp:
                 if resp.status == 200:
-                    await resp.json()
+                    async for chunk in resp.content.iter_any():
+                        if ttft == -1:
+                            ttft = time.time() - start_time
                     latency = time.time() - start_time
-                    latencies.append(latency)
+                    results['latencies'].append(latency)
+                    results['ttfts'].append(ttft)
                 else:
-                    print(f"   - Single completion error: {resp.status} {await resp.text()}")
-        except aiohttp.ClientError as e:
-            print(f"   - Single completion connection error: {e}")
-            
-        await asyncio.sleep(1) # Send a request every second
+                    results['errors'] += 1
+        except aiohttp.ClientError:
+            results['errors'] += 1
+        
+        await asyncio.sleep(0.1)
 
-    if latencies:
-        avg_latency = sum(latencies) / len(latencies)
-        print("\n--- Single-User Completion Results ---")
-        print(f"   - Average latency: {avg_latency:.4f} seconds")
-        print(f"   - Total requests sent: {len(latencies)}")
+def print_stats(label: str, latencies: list, ttfts: list, duration: float):
+    """Calculates and prints performance statistics."""
+    if not latencies:
+        print(f"\n--- {label} ---")
+        print("   - No successful requests recorded.")
+        return
 
-async def main():
+    throughput = len(latencies) / duration
+    
+    print(f"\n--- {label} (Duration: {duration:.2f}s) ---")
+    print(f"   - Successful requests: {len(latencies)}")
+    print(f"   - Throughput: {throughput:.2f} req/s")
+    
+    for metric_name, data in [("Latency", latencies), ("TTFT", ttfts)]:
+        if not data: continue
+        print(f"\n   {metric_name} Stats:")
+        print(f"     - Average: {statistics.mean(data):.4f}s")
+        print(f"     - Median (p50): {statistics.median(data):.4f}s")
+        if len(data) > 1:
+            data.sort()
+            p95_index = int(len(data) * 0.95)
+            p99_index = int(len(data) * 0.99)
+            print(f"     - p95: {data[p95_index]:.4f}s")
+            print(f"     - p99: {data[p99_index]:.4f}s")
+        print(f"     - Min: {min(data):.4f}s")
+        print(f"     - Max: {max(data):.4f}s")
+
+
+async def run_single_completions(duration_seconds: int, concurrency: int):
+    """Runs a single-user completion test for a fixed duration."""
+    print(f"\n--- Running Single-User Test (Concurrency: {concurrency}, Duration: {duration_seconds}s) ---")
+    
+    results = {'latencies': [], 'ttfts': [], 'errors': 0}
+    stop_event = asyncio.Event()
+    
+    async with aiohttp.ClientSession() as session:
+        start_time = time.time()
+        
+        # Start worker tasks
+        worker_tasks = [
+            asyncio.create_task(single_request_worker(session, stop_event, results))
+            for _ in range(concurrency)
+        ]
+        
+        # Wait for the specified duration
+        await asyncio.sleep(duration_seconds)
+        
+        # Stop workers
+        stop_event.set()
+        await asyncio.gather(*worker_tasks)
+        
+        end_time = time.time()
+
+    print_stats(f"Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], end_time - start_time)
+
+
+async def run_mixed_workload_test(concurrency: int):
+    """Runs a batch job alongside a single-user load test."""
+    print(f"\n--- Running Mixed-Workload Test (Batch + {concurrency} Concurrent Users) ---")
+    
+    results = {'latencies': [], 'ttfts': [], 'errors': 0}
+    stop_event = asyncio.Event()
+
     async with aiohttp.ClientSession() as session:
         # Step 1: Upload dataset
         file_id = await upload_dataset(session)
-        if not file_id:
-            return
+        if not file_id: return
 
         # Step 2: Create batch
         batch_id = await create_batch(session, file_id)
-        if not batch_id:
-            return
-
-        # Step 3 & 4: Monitor batch and run single completions concurrently
-        stop_event = asyncio.Event()
+        if not batch_id: return
         
+        test_start_time = time.time()
+        
+        # Start batch monitoring and single-user workers concurrently
         monitor_task = asyncio.create_task(monitor_batch_status(session, batch_id))
-        completions_task = asyncio.create_task(run_single_completions(session, stop_event))
+        worker_tasks = [
+             asyncio.create_task(single_request_worker(session, stop_event, results))
+             for _ in range(concurrency)
+        ]
 
+        # Wait for the batch job to finish
         await monitor_task
+        
+        # Stop the single-user workers
         stop_event.set()
-        await completions_task
+        await asyncio.gather(*worker_tasks)
+
+        test_end_time = time.time()
+
+    print_stats(f"Mixed-Workload Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], test_end_time - test_start_time)
+
+
+async def run_batch_only_test():
+    """Runs the performance test for a batch job without other requests."""
+    print("\n" + "="*80)
+    print("--- Running Test Condition 1: Batch-Only Performance ---")
+    print("="*80)
+    async with aiohttp.ClientSession() as session:
+        file_id = await upload_dataset(session)
+        if not file_id: return
+        batch_id = await create_batch(session, file_id)
+        if not batch_id: return
+        await monitor_batch_status(session, batch_id)
+
+
+async def main():
+    # Test 1: Batch-only
+    await run_batch_only_test()
+
+    # Test 2: Isolated single-user load tests
+    print("\n" + "="*80)
+    print("--- Running Test Condition 2: Isolated Single-User Performance ---")
+    print("="*80)
+    await run_single_completions(duration_seconds=30, concurrency=1)
+    await run_single_completions(duration_seconds=30, concurrency=10)
+    
+    # Test 3: Mixed workload tests
+    print("\n" + "="*80)
+    print("--- Running Test Condition 3: Mixed-Workload Performance ---")
+    print("="*80)
+    await run_mixed_workload_test(concurrency=1)
+    await run_mixed_workload_test(concurrency=10)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

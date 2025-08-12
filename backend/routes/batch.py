@@ -14,11 +14,9 @@ from utils.vllm_queue import low_priority_queue, VLLMRequest
 
 router = APIRouter()
 
-# In-memory storage for simplicity
 batches_db = {}
 files_db = {}
 
-# Directory to store uploaded and generated files
 os.makedirs("batch_files", exist_ok=True)
 FILES_DIR = "batch_files"
 
@@ -53,7 +51,6 @@ async def process_batch_in_background(batch_id: str):
     if not batch:
         return
 
-    # 1. Update batch status
     batch.status = "in_progress"
     batch.in_progress_at = int(datetime.now().timestamp())
     batch.expires_at = int((datetime.now() + timedelta(hours=24)).timestamp())
@@ -64,7 +61,6 @@ async def process_batch_in_background(batch_id: str):
     output_file_path = os.path.join(FILES_DIR, output_file_id)
     error_file_path = os.path.join(FILES_DIR, error_file_id)
 
-    # 2. Read input file and prepare requests
     requests_to_process = []
     try:
         with open(input_file_path, "r") as f_in:
@@ -98,7 +94,6 @@ async def process_batch_in_background(batch_id: str):
                     requests_to_process.append(vllm_request)
 
                 except (json.JSONDecodeError, ValueError) as e:
-                    # Tally and log invalid lines but don't stop processing
                     batch.request_counts.failed += 1
                     with open(error_file_path, "a") as f_err:
                         error_result = {"error": f"Error processing line {i+1}: {e}"}
@@ -113,20 +108,15 @@ async def process_batch_in_background(batch_id: str):
 
     batch.request_counts.total = len(requests_to_process)
 
-    # 3. Queue all requests
     for req in requests_to_process:
         await low_priority_queue.put(req)
 
-    # 4. Process results as they complete
     with open(output_file_path, "w") as f_out, open(error_file_path, "a") as f_err:
         for req in requests_to_process:
-            # Check for cancellation
             if batch.status == "cancelling":
-                # We don't remove the future from the queue, just ignore its result
                 continue
             
             try:
-                # Wait for the result from the consumer
                 result = await asyncio.wait_for(req.future, timeout=180) 
                 
                 status_code = result.get("status_code")
@@ -162,7 +152,6 @@ async def process_batch_in_background(batch_id: str):
                 }
                 f_err.write(json.dumps(error_entry) + "\n")
 
-    # 5. Finalize batch
     if batch.status == "cancelling":
         batch.status = "cancelled"
         batch.cancelled_at = int(datetime.now().timestamp())
@@ -172,7 +161,6 @@ async def process_batch_in_background(batch_id: str):
         
     batch.output_file_id = output_file_id
     
-    # Create FileObject for output file
     if os.path.exists(output_file_path) and os.path.getsize(output_file_path) > 0:
         files_db[output_file_id] = FileObject(
             id=output_file_id,
@@ -182,12 +170,10 @@ async def process_batch_in_background(batch_id: str):
             purpose="batch_output"
         )
     else:
-        # If the file is empty (e.g., all requests failed), don't link it.
         batch.output_file_id = None
         if os.path.exists(output_file_path):
              os.remove(output_file_path)
 
-    # Create FileObject for error file
     if os.path.exists(error_file_path) and os.path.getsize(error_file_path) > 0:
         batch.error_file_id = error_file_id
         files_db[error_file_id] = FileObject(
@@ -205,8 +191,6 @@ async def process_batch_in_background(batch_id: str):
 
 @router.post("/v1/batches", response_model=Batch, status_code=201)
 async def create_batch(batch_create: BatchCreate, background_tasks: BackgroundTasks):
-    # This is a simplified implementation.
-    # We will expand on this in the next steps.
     batch_id = f"batch_{uuid.uuid4()}"
     
     new_batch = Batch(

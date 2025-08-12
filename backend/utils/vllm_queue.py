@@ -23,11 +23,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-async def vllm_consumer(batch_size: int = 128, wait_time: float = 0.1):
+async def vllm_consumer(worker_id: int, batch_size: int = 128, wait_time: float = 0.1):
     """
     A consumer that pulls requests from queues, batches them, and sends them to vLLM.
     """
-    logger.info("vLLM consumer started.")
+    logger.info(f"vLLM consumer worker-{worker_id} started.")
     while True:
         requests_batch: List[VLLMRequest] = []
         
@@ -56,7 +56,7 @@ async def vllm_consumer(batch_size: int = 128, wait_time: float = 0.1):
             continue
 
         # 2. Process the batch
-        logger.info(f"Processing batch of {len(requests_batch)} requests.")
+        logger.info(f"Worker-{worker_id}: Processing batch of {len(requests_batch)} requests.")
         endpoint = requests_batch[0].vllm_endpoint
         vllm_full_url = f"{VLLM_URL}{endpoint}"
 
@@ -72,7 +72,7 @@ async def vllm_consumer(batch_size: int = 128, wait_time: float = 0.1):
         for request, response in zip(requests_batch, responses):
             try:
                 if isinstance(response, Exception):
-                    logger.error(f"Request {request.custom_id} failed with exception: {response}")
+                    logger.error(f"Worker-{worker_id}: Request {request.custom_id} failed with exception: {response}")
                     result = {
                         "status_code": 500,
                         "body": {"error": str(response)}
@@ -85,12 +85,12 @@ async def vllm_consumer(batch_size: int = 128, wait_time: float = 0.1):
                         "body": response_body
                     }
                     if response.status != 200:
-                         logger.warning(f"Request {request.custom_id} received non-200 status: {response.status}")
+                         logger.warning(f"Worker-{worker_id}: Request {request.custom_id} received non-200 status: {response.status}")
                     
                     request.future.set_result(result)
 
             except Exception as e:
-                logger.error(f"Error processing response for request {request.custom_id}: {e}")
+                logger.error(f"Worker-{worker_id}: Error processing response for request {request.custom_id}: {e}")
                 error_result = {
                     "status_code": 500,
                     "body": {"error": f"Internal server error processing response: {e}"}
@@ -99,8 +99,8 @@ async def vllm_consumer(batch_size: int = 128, wait_time: float = 0.1):
                     request.future.set_result(error_result)
 
 
-def start_vllm_consumer():
+def start_vllm_consumer(worker_id: int):
     """
     Starts the vLLM consumer as a background task.
     """
-    asyncio.create_task(vllm_consumer())
+    asyncio.create_task(vllm_consumer(worker_id))
