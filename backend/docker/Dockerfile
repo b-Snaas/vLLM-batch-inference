@@ -5,14 +5,13 @@ FROM vllm/vllm-openai:latest
 WORKDIR /app
 
 # Copy the backend application code
-COPY . /app/
+COPY backend/ .
 
 # Install Python dependencies for the backend
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy the startup script and make it executable
-COPY /app/docker/start.sh /start.sh
-RUN chmod +x /start.sh
+# Make the startup script executable
+RUN chmod +x /app/docker/start.sh
 
 # Expose ports for vLLM (8000) and the FastAPI backend (3000)
 EXPOSE 8000
@@ -22,5 +21,5 @@ EXPOSE 3000
 ENV VLLM_URL=http://localhost:8000
 
 # Set the default command to run our combined startup script
-CMD ["/start.sh"]
+CMD ["/app/docker/start.sh"]
 
