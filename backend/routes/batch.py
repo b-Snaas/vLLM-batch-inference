@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from utils.schemas import Batch, FileObject, BatchCreate
 from utils.config import VLLM_URL
 from utils.vllm_queue import batch_queue, VLLMRequest
+from utils.truncation import truncate_messages, MAX_INPUT_LENGTH
 
 
 router = APIRouter()
@@ -120,6 +121,19 @@ async def process_batch_in_background(batch_id: str):
     tasks = [req.future for req in requests_to_process]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    def _is_context_too_long_error(body) -> bool:
+        try:
+            if not isinstance(body, dict):
+                return False
+            message = (
+                str(body.get("message", ""))
+                or str(body.get("detail", ""))
+                or str(body.get("error", ""))
+            ).lower()
+            return "too long" in message or "context length" in message or "max context" in message
+        except Exception:
+            return False
+
     with open(output_file_path, "w") as f_out, open(error_file_path, "a") as f_err:
         for i, result in enumerate(results):
             req = requests_to_process[i]
@@ -153,6 +167,53 @@ async def process_batch_in_background(batch_id: str):
                             batch.usage["prompt_tokens"] = batch.usage.get("prompt_tokens", 0) + int(usage.get("prompt_tokens", 0))
                             batch.usage["completion_tokens"] = batch.usage.get("completion_tokens", 0) + int(usage.get("completion_tokens", 0))
                 else:
+                    # Retry once with truncated messages if the error indicates context is too long
+                    did_retry = False
+                    if status_code == 400 and _is_context_too_long_error(body):
+                        try:
+                            original_payload = dict(req.request_body)
+                            original_messages = list(original_payload.get("messages", []))
+                            truncated_messages = truncate_messages(original_messages, MAX_INPUT_LENGTH)
+                            retry_payload = {**original_payload, "messages": truncated_messages}
+                            retry_request = VLLMRequest(
+                                custom_id=f"{req.custom_id}-retry",
+                                request_body=retry_payload,
+                                vllm_endpoint=req.vllm_endpoint,
+                            )
+                            await batch_queue.put(retry_request)
+                            retry_result = await asyncio.wait_for(retry_request.future, timeout=180)
+                            did_retry = True
+
+                            retry_status = retry_result.get("status_code")
+                            retry_body = retry_result.get("body")
+
+                            if retry_status == 200:
+                                response_entry = {
+                                    "custom_id": req.custom_id,
+                                    "response": {"status_code": retry_status, "body": retry_body}
+                                }
+                                f_out.write(json.dumps(response_entry) + "\n")
+                                batch.request_counts.completed += 1
+                                continue
+                            else:
+                                error_entry = {
+                                    "custom_id": req.custom_id,
+                                    "response": {"status_code": retry_status, "body": retry_body}
+                                }
+                                f_err.write(json.dumps(error_entry) + "\n")
+                                batch.request_counts.failed += 1
+                                continue
+                        except Exception as retry_exc:
+                            # Retry failed due to internal error
+                            error_entry = {
+                                "custom_id": req.custom_id,
+                                "response": {"status_code": 500, "body": {"error": str(retry_exc)}}
+                            }
+                            f_err.write(json.dumps(error_entry) + "\n")
+                            batch.request_counts.failed += 1
+                            continue
+
+                    # No retry or retry not applicable: record original error
                     error_entry = {
                         "custom_id": req.custom_id,
                         "response": {"status_code": status_code, "body": body}
