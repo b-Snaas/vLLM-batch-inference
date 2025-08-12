@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from utils.schemas import ChatCompletionRequest
 from utils.truncation import truncate_messages, MAX_INPUT_LENGTH
 from utils.config import VLLM_URL
-from utils.vllm_queue import high_priority_queue, VLLMRequest
+from utils.vllm_queue import interactive_queue, VLLMRequest
 
 router = APIRouter()
 
@@ -40,6 +40,9 @@ async def stream_vllm_response(request: ChatCompletionRequest):
     async with aiohttp.ClientSession() as session:
         vllm_endpoint = f"{VLLM_URL}/v1/chat/completions"
         payload = request.model_dump(exclude_none=True)
+        extra_body = payload.get("extra_body", {})
+        extra_body["priority"] = 0
+        payload["extra_body"] = extra_body
 
         try:
             async with session.post(vllm_endpoint, json=payload, timeout=180) as resp:
@@ -65,10 +68,14 @@ async def chat_completions(request: ChatCompletionRequest):
             media_type="text/event-stream"
         )
     else:
+        payload = request.model_dump(exclude_none=True)
+        extra_body = payload.get("extra_body", {})
+        extra_body["priority"] = 0
+        payload["extra_body"] = extra_body
         vllm_request = VLLMRequest(
-            request_body=request.model_dump(exclude_none=True)
+            request_body=payload
         )
-        await high_priority_queue.put(vllm_request)
+        await interactive_queue.put(vllm_request)
         
         try:
             result = await asyncio.wait_for(vllm_request.future, timeout=180)

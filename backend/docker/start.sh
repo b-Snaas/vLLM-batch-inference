@@ -11,9 +11,10 @@ set -euo pipefail
   QUANTIZATION=${QUANTIZATION:-fp8}
   DTYPE=${DTYPE:-half}
   CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+  SCHEDULING_POLICY=${SCHEDULING_POLICY:-priority}
   
   echo "Starting vLLM server..."
-  echo "Model: ${MODEL_NAME} | dtype: ${DTYPE} | max_input_tokens: ${MAX_MODEL_LEN} | max_output_tokens: ${MAX_TOKENS} | batch_size: ${BATCH_SIZE}"
+  echo "Model: ${MODEL_NAME} | dtype: ${DTYPE} | max_input_tokens: ${MAX_MODEL_LEN} | max_output_tokens: ${MAX_TOKENS} | batch_size: ${BATCH_SIZE} | scheduling: ${SCHEDULING_POLICY}"
   
   python3 -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_NAME}" \
@@ -25,6 +26,7 @@ set -euo pipefail
     --gpu-memory-utilization 0.95 \
     --tensor-parallel-size 1 \
     --enable-chunked-prefill \
+    --scheduling-policy "${SCHEDULING_POLICY}" \
     --port "${PORT}" \
     --served-model-name qwen3-4b \
     --trust-remote-code \

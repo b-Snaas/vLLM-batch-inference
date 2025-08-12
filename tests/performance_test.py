@@ -63,14 +63,33 @@ async def monitor_batch_status(session: aiohttp.ClientSession, batch_id: str):
                 if status in ["completed", "failed", "cancelled"]:
                     end_time = time.time()
                     processing_time = end_time - start_time
-                    completed_requests = batch_info['request_counts']['completed']
                     
                     print(f"   - Batch finished with status: {status}")
                     print(f"   - Total batch processing time: {processing_time:.2f} seconds")
-                    if processing_time > 0 and completed_requests > 0:
-                        throughput = completed_requests / processing_time
-                        print(f"   - Batch throughput: {throughput:.2f} req/s")
-                    print(f"   - Request counts: {batch_info['request_counts']}")
+
+                    if 'request_counts' in batch_info:
+                        completed_requests = batch_info['request_counts'].get('completed', 0)
+                        if processing_time > 0 and completed_requests > 0:
+                            throughput = completed_requests / processing_time
+                            print(f"   - Batch throughput: {throughput:.2f} req/s")
+                        print(f"   - Request counts: {batch_info['request_counts']}")
+
+                    if status == "completed" and 'usage' in batch_info and batch_info['usage'] is not None:
+                        input_tokens = batch_info['usage'].get('prompt_tokens', 0)
+                        output_tokens = batch_info['usage'].get('completion_tokens', 0)
+                        total_tokens = input_tokens + output_tokens
+
+                        print(f"   - Token usage:")
+                        print(f"     - Input tokens: {input_tokens}")
+                        print(f"     - Output tokens: {output_tokens}")
+                        print(f"     - Total tokens: {total_tokens}")
+
+                        if processing_time > 0:
+                            input_tps = input_tokens / processing_time
+                            output_tps = output_tokens / processing_time
+                            print(f"   - Throughput (input tokens/s): {input_tps:.2f}")
+                            print(f"   - Throughput (output tokens/s): {output_tps:.2f}")
+
                     break
             else:
                 print(f"   - Error fetching batch status: {resp.status}")
@@ -83,12 +102,14 @@ async def single_request_worker(session: aiohttp.ClientSession, stop_event: asyn
         "model": "qwen3-4b",
         "messages": [{"role": "user", "content": "Hello, how are you?"}],
         "max_tokens": 50,
-        "stream": True
+        "stream": True,
+        "stream_options": {"include_usage": True}
     }
     
     while not stop_event.is_set():
         start_time = time.time()
         ttft = -1
+        prompt_tokens = 0
         completion_tokens = 0
         try:
             async with session.post(f"{API_BASE_URL}/v1/chat/completions", json=payload, headers=HEADERS) as resp:
@@ -108,8 +129,8 @@ async def single_request_worker(session: aiohttp.ClientSession, stop_event: asyn
                             if data_str != "[DONE]":
                                 try:
                                     json_data = json.loads(data_str)
-                                    # The 'usage' field is in the last chunk and contains token counts
                                     if 'usage' in json_data and json_data['usage'] is not None:
+                                        prompt_tokens = json_data['usage'].get('prompt_tokens', 0)
                                         completion_tokens = json_data['usage'].get('completion_tokens', 0)
                                 except json.JSONDecodeError:
                                     pass # Ignore malformed json chunks
@@ -117,6 +138,8 @@ async def single_request_worker(session: aiohttp.ClientSession, stop_event: asyn
                     latency = time.time() - start_time
                     results['latencies'].append(latency)
                     results['ttfts'].append(ttft if ttft != -1 else 0)
+                    if prompt_tokens > 0:
+                        results['prompt_tokens'].append(prompt_tokens)
                     if completion_tokens > 0:
                         results['completion_tokens'].append(completion_tokens)
                 else:
@@ -126,7 +149,7 @@ async def single_request_worker(session: aiohttp.ClientSession, stop_event: asyn
         
         await asyncio.sleep(0.1)
 
-def print_stats(label: str, latencies: list, ttfts: list, completion_tokens: list, duration: float):
+def print_stats(label: str, latencies: list, ttfts: list, prompt_tokens: list, completion_tokens: list, duration: float):
     """Calculates and prints performance statistics."""
     if not latencies:
         print(f"\n--- {label} ---")
@@ -134,13 +157,16 @@ def print_stats(label: str, latencies: list, ttfts: list, completion_tokens: lis
         return
 
     throughput_reqs = len(latencies) / duration
-    total_tokens = sum(completion_tokens)
-    throughput_tps = total_tokens / duration if duration > 0 else 0
+    total_prompt_tokens = sum(prompt_tokens)
+    total_completion_tokens = sum(completion_tokens)
+    throughput_prompt_tps = total_prompt_tokens / duration if duration > 0 else 0
+    throughput_completion_tps = total_completion_tokens / duration if duration > 0 else 0
     
     print(f"\n--- {label} (Duration: {duration:.2f}s) ---")
     print(f"   - Successful requests: {len(latencies)}")
     print(f"   - Throughput (req/s): {throughput_reqs:.2f}")
-    print(f"   - Throughput (tokens/s): {throughput_tps:.2f}")
+    print(f"   - Throughput (prompt tokens/s): {throughput_prompt_tps:.2f}")
+    print(f"   - Throughput (completion tokens/s): {throughput_completion_tps:.2f}")
     
     for metric_name, data in [("Latency", latencies), ("TTFT", ttfts)]:
         if not data: continue
@@ -161,7 +187,7 @@ async def run_single_completions(duration_seconds: int, concurrency: int):
     """Runs a single-user completion test for a fixed duration."""
     print(f"\n--- Running Single-User Test (Concurrency: {concurrency}, Duration: {duration_seconds}s) ---")
     
-    results = {'latencies': [], 'ttfts': [], 'errors': 0, 'completion_tokens': []}
+    results = {'latencies': [], 'ttfts': [], 'errors': 0, 'prompt_tokens': [], 'completion_tokens': []}
     stop_event = asyncio.Event()
     
     async with aiohttp.ClientSession() as session:
@@ -182,14 +208,14 @@ async def run_single_completions(duration_seconds: int, concurrency: int):
         
         end_time = time.time()
 
-    print_stats(f"Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], results['completion_tokens'], end_time - start_time)
+    print_stats(f"Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], results['prompt_tokens'], results['completion_tokens'], end_time - start_time)
 
 
 async def run_mixed_workload_test(concurrency: int):
     """Runs a batch job alongside a single-user load test."""
     print(f"\n--- Running Mixed-Workload Test (Batch + {concurrency} Concurrent Users) ---")
     
-    results = {'latencies': [], 'ttfts': [], 'errors': 0, 'completion_tokens': []}
+    results = {'latencies': [], 'ttfts': [], 'errors': 0, 'prompt_tokens': [], 'completion_tokens': []}
     stop_event = asyncio.Event()
 
     async with aiohttp.ClientSession() as session:
@@ -219,7 +245,7 @@ async def run_mixed_workload_test(concurrency: int):
 
         test_end_time = time.time()
 
-    print_stats(f"Mixed-Workload Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], results['completion_tokens'], test_end_time - test_start_time)
+    print_stats(f"Mixed-Workload Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], results['prompt_tokens'], results['completion_tokens'], test_end_time - test_start_time)
 
 
 async def run_batch_only_test():

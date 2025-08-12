@@ -16,40 +16,31 @@ class VLLMRequest:
     vllm_endpoint: str = "/v1/chat/completions"
     custom_id: str = None
 
-high_priority_queue = asyncio.Queue()
-low_priority_queue = asyncio.Queue()
+interactive_queue = asyncio.Queue()
+batch_queue = asyncio.Queue()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-async def vllm_consumer(worker_id: int, batch_size: int = 128, wait_time: float = 0.1):
+async def vllm_consumer(worker_id: int, queue: asyncio.Queue, batch_size: int, wait_time: float):
     """
-    A consumer that pulls requests from queues, batches them, and sends them to vLLM.
-    It dynamically switches between low-latency and high-throughput modes.
+    A consumer that pulls requests from a given queue, batches them, and sends them to vLLM.
     """
-    logger.info(f"vLLM consumer worker-{worker_id} started.")
+    logger.info(f"vLLM consumer worker-{worker_id} started for queue: {queue.__class__.__name__}.")
     while True:
         requests_batch: List[VLLMRequest] = []
         
-        if not high_priority_queue.empty():
-            while not high_priority_queue.empty() and len(requests_batch) < batch_size:
-                request = await high_priority_queue.get()
+        start_time = time.time()
+        while time.time() - start_time < wait_time and len(requests_batch) < batch_size:
+            try:
+                request = queue.get_nowait()
                 requests_batch.append(request)
-                high_priority_queue.task_done()
-        
-        else:
-            start_time = time.time()
-            while time.time() - start_time < wait_time and len(requests_batch) < batch_size:
-                if not low_priority_queue.empty():
-                    request = await low_priority_queue.get()
-                    requests_batch.append(request)
-                    low_priority_queue.task_done()
-                else:
-
-                    await asyncio.sleep(0.01)
-                    if not requests_batch: 
-                        break
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                await asyncio.sleep(0.01)
+                if not requests_batch:  # If no requests were in the batch, break inner loop to avoid waiting
+                    break
         
         if not requests_batch:
             await asyncio.sleep(0.01)
@@ -97,8 +88,8 @@ async def vllm_consumer(worker_id: int, batch_size: int = 128, wait_time: float 
                     request.future.set_result(error_result)
 
 
-def start_vllm_consumer(worker_id: int):
+def start_vllm_consumer(worker_id: int, queue: asyncio.Queue, batch_size: int, wait_time: float):
     """
-    Starts the vLLM consumer as a background task.
+    Starts the vLLM consumer as a background task for a specific queue.
     """
-    asyncio.create_task(vllm_consumer(worker_id))
+    asyncio.create_task(vllm_consumer(worker_id, queue, batch_size, wait_time))

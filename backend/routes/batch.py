@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from utils.schemas import Batch, FileObject, BatchCreate
 from utils.config import VLLM_URL
-from utils.vllm_queue import low_priority_queue, VLLMRequest
+from utils.vllm_queue import batch_queue, VLLMRequest
 
 
 router = APIRouter()
@@ -88,7 +88,13 @@ async def process_batch_in_background(batch_id: str):
                     
                     vllm_request = VLLMRequest(
                         custom_id=custom_id,
-                        request_body=request_body,
+                        request_body={
+                            **request_body,
+                            "extra_body": {
+                                **request_body.get("extra_body", {}),
+                                "priority": 10
+                            }
+                        },
                         vllm_endpoint=batch.endpoint
                     )
                     requests_to_process.append(vllm_request)
@@ -109,16 +115,33 @@ async def process_batch_in_background(batch_id: str):
     batch.request_counts.total = len(requests_to_process)
 
     for req in requests_to_process:
-        await low_priority_queue.put(req)
+        await batch_queue.put(req)
+
+    tasks = [asyncio.wait_for(req.future, timeout=180) for req in requests_to_process]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     with open(output_file_path, "w") as f_out, open(error_file_path, "a") as f_err:
-        for req in requests_to_process:
+        for i, result in enumerate(results):
+            req = requests_to_process[i]
+
             if batch.status == "cancelling":
-                continue
+                break
             
-            try:
-                result = await asyncio.wait_for(req.future, timeout=180) 
-                
+            if isinstance(result, asyncio.TimeoutError):
+                batch.request_counts.failed += 1
+                error_entry = {
+                    "custom_id": req.custom_id,
+                    "response": {"status_code": 504, "body": "Request timed out"}
+                }
+                f_err.write(json.dumps(error_entry) + "\n")
+            elif isinstance(result, Exception):
+                batch.request_counts.failed += 1
+                error_entry = {
+                    "custom_id": req.custom_id,
+                    "response": {"status_code": 500, "body": f"An unexpected error occurred: {str(result)}"}
+                }
+                f_err.write(json.dumps(error_entry) + "\n")
+            else:
                 status_code = result.get("status_code")
                 body = result.get("body")
 
@@ -136,21 +159,6 @@ async def process_batch_in_background(batch_id: str):
                     }
                     f_err.write(json.dumps(error_entry) + "\n")
                     batch.request_counts.failed += 1
-
-            except asyncio.TimeoutError:
-                batch.request_counts.failed += 1
-                error_entry = {
-                    "custom_id": req.custom_id,
-                    "response": {"status_code": 504, "body": "Request timed out"}
-                }
-                f_err.write(json.dumps(error_entry) + "\n")
-            except Exception as e:
-                batch.request_counts.failed += 1
-                error_entry = {
-                    "custom_id": req.custom_id,
-                    "response": {"status_code": 500, "body": f"An unexpected error occurred: {e}"}
-                }
-                f_err.write(json.dumps(error_entry) + "\n")
 
     if batch.status == "cancelling":
         batch.status = "cancelled"
