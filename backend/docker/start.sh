@@ -13,7 +13,7 @@ set -euo pipefail
   CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
   
   echo "Starting vLLM server..."
-  echo "Model: ${MODEL_NAME} | dtype: ${DTYPE} | max_model_len: ${MAX_MODEL_LEN} | max_tokens: ${MAX_TOKENS} | batch_size: ${BATCH_SIZE}"
+  echo "Model: ${MODEL_NAME} | dtype: ${DTYPE} | max_input_tokens: ${MAX_MODEL_LEN} | max_output_tokens: ${MAX_TOKENS} | batch_size: ${BATCH_SIZE}"
   
   python3 -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_NAME}" \
