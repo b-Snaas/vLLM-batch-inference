@@ -85,17 +85,15 @@ async def process_batch_in_background(batch_id: str):
                     custom_id = f"request-{i+1}"
                     request_body = {
                         "model": "qwen3-4b",
-                        "messages": [final_message]
+                         "messages": [final_message],
+                         "max_tokens": 256
                     }
                     
                     vllm_request = VLLMRequest(
                         custom_id=custom_id,
                         request_body={
                             **request_body,
-                            "extra_body": {
-                                **request_body.get("extra_body", {}),
-                                "priority": 10
-                            }
+                            "priority": 10
                         },
                         vllm_endpoint=batch.endpoint
                     )

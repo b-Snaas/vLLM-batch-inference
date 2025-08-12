@@ -40,9 +40,7 @@ async def stream_vllm_response(request: ChatCompletionRequest):
     async with aiohttp.ClientSession() as session:
         vllm_endpoint = f"{VLLM_URL}/v1/chat/completions"
         payload = request.model_dump(exclude_none=True)
-        extra_body = payload.get("extra_body", {})
-        extra_body["priority"] = 0
-        payload["extra_body"] = extra_body
+        payload["priority"] = 0
 
         try:
             async with session.post(vllm_endpoint, json=payload, timeout=180) as resp:
@@ -69,9 +67,7 @@ async def chat_completions(request: ChatCompletionRequest):
         )
     else:
         payload = request.model_dump(exclude_none=True)
-        extra_body = payload.get("extra_body", {})
-        extra_body["priority"] = 0
-        payload["extra_body"] = extra_body
+        payload["priority"] = 0
         vllm_request = VLLMRequest(
             request_body=payload
         )
