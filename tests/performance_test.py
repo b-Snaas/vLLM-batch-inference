@@ -70,7 +70,6 @@ async def monitor_batch_status(session: aiohttp.ClientSession, batch_id: str):
                     if processing_time > 0 and completed_requests > 0:
                         throughput = completed_requests / processing_time
                         print(f"   - Batch throughput: {throughput:.2f} req/s")
-                    print(f"   - Request counts: {batch_info['request_counts']}")
 
                     # Token usage and token throughput (tokens/sec)
                     usage = batch_info.get('usage') or {}
