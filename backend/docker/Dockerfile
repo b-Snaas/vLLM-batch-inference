@@ -20,6 +20,6 @@ EXPOSE 3000
 # Set the URL for the vLLM service, which will be running locally inside the container
 ENV VLLM_URL=http://localhost:8000
 
-# Set the default command to run our combined startup script
-CMD ["/app/docker/start.sh"]
+# Set the entrypoint to the combined startup script
+ENTRYPOINT ["/app/docker/start.sh"]
 
