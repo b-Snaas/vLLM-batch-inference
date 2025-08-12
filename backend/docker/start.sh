@@ -33,10 +33,17 @@ set -euo pipefail
 
 # Wait for the vLLM server to be ready
 echo "Waiting for vLLM server to start..."
-while ! curl -s http://localhost:8000/health > /dev/null; do
+timeout=60
+while ! curl -s --fail http://localhost:8000/health > /dev/null; do
+  timeout=$((timeout-1))
+  if [ $timeout -eq 0 ]; then
+    echo "Error: vLLM server did not start within 60 seconds."
+    exit 1
+  fi
+  printf "."
   sleep 1
 done
-echo "vLLM server started."
+echo "\nvLLM server started."
 
 # Start the FastAPI backend
 echo "Starting FastAPI server..."
