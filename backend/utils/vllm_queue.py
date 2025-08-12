@@ -26,36 +26,35 @@ logger = logging.getLogger(__name__)
 async def vllm_consumer(worker_id: int, batch_size: int = 128, wait_time: float = 0.1):
     """
     A consumer that pulls requests from queues, batches them, and sends them to vLLM.
+    It dynamically switches between low-latency and high-throughput modes.
     """
     logger.info(f"vLLM consumer worker-{worker_id} started.")
     while True:
         requests_batch: List[VLLMRequest] = []
         
-        # 1. Collect requests, prioritizing the high-priority queue
-        start_time = time.time()
-        while time.time() - start_time < wait_time and len(requests_batch) < batch_size:
-            # Prioritize high-priority queue
+        if not high_priority_queue.empty():
             while not high_priority_queue.empty() and len(requests_batch) < batch_size:
                 request = await high_priority_queue.get()
                 requests_batch.append(request)
                 high_priority_queue.task_done()
-            
-            # If there's space, check low-priority queue
-            if len(requests_batch) < batch_size:
-                 while not low_priority_queue.empty() and len(requests_batch) < batch_size:
+        
+        else:
+            start_time = time.time()
+            while time.time() - start_time < wait_time and len(requests_batch) < batch_size:
+                if not low_priority_queue.empty():
                     request = await low_priority_queue.get()
                     requests_batch.append(request)
                     low_priority_queue.task_done()
+                else:
 
-            # If no requests were found, sleep briefly to prevent a tight loop
-            if not requests_batch:
-                await asyncio.sleep(0.01)
-                break # Exit inner while to re-check timer
+                    await asyncio.sleep(0.01)
+                    if not requests_batch: 
+                        break
         
         if not requests_batch:
+            await asyncio.sleep(0.01)
             continue
 
-        # 2. Process the batch
         logger.info(f"Worker-{worker_id}: Processing batch of {len(requests_batch)} requests.")
         endpoint = requests_batch[0].vllm_endpoint
         vllm_full_url = f"{VLLM_URL}{endpoint}"
@@ -68,7 +67,6 @@ async def vllm_consumer(worker_id: int, batch_size: int = 128, wait_time: float 
             
             responses = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 3. Set results for each future
         for request, response in zip(requests_batch, responses):
             try:
                 if isinstance(response, Exception):
