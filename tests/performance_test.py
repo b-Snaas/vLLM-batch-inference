@@ -118,8 +118,6 @@ async def single_request_worker(session: aiohttp.ClientSession, stop_event: asyn
                         line = line.strip()
                         if not line:
                             continue
-
-                        # First chunk marks TTFT
                         if ttft == -1:
                             ttft = time.time() - start_time
                         
@@ -133,7 +131,7 @@ async def single_request_worker(session: aiohttp.ClientSession, stop_event: asyn
                                         prompt_tokens = json_data['usage'].get('prompt_tokens', 0)
                                         completion_tokens = json_data['usage'].get('completion_tokens', 0)
                                 except json.JSONDecodeError:
-                                    pass # Ignore malformed json chunks
+                                    pass
 
                     latency = time.time() - start_time
                     results['latencies'].append(latency)
@@ -208,7 +206,7 @@ async def run_single_completions(duration_seconds: int, concurrency: int):
         
         end_time = time.time()
 
-    print_stats(f"Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], results['prompt_tokens'], results['completion_tokens'], end_time - start_time)
+    print_stats(f"Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], end_time - start_time)
 
 
 async def run_mixed_workload_test(concurrency: int):
@@ -245,7 +243,7 @@ async def run_mixed_workload_test(concurrency: int):
 
         test_end_time = time.time()
 
-    print_stats(f"Mixed-Workload Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], results['prompt_tokens'], results['completion_tokens'], test_end_time - test_start_time)
+    print_stats(f"Mixed-Workload Single-User Results (Concurrency: {concurrency})", results['latencies'], results['ttfts'], test_end_time - test_start_time)
 
 
 async def run_batch_only_test():

@@ -54,6 +54,8 @@ async def process_batch_in_background(batch_id: str):
     batch.status = "in_progress"
     batch.in_progress_at = int(datetime.now().timestamp())
     batch.expires_at = int((datetime.now() + timedelta(hours=24)).timestamp())
+    if getattr(batch, "usage", None) is None:
+        batch.usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
     input_file_path = os.path.join(FILES_DIR, batch.input_file_id)
     output_file_id = f"file-{uuid.uuid4()}"
@@ -117,7 +119,7 @@ async def process_batch_in_background(batch_id: str):
     for req in requests_to_process:
         await batch_queue.put(req)
 
-    tasks = [asyncio.wait_for(req.future, timeout=180) for req in requests_to_process]
+    tasks = [req.future for req in requests_to_process]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     with open(output_file_path, "w") as f_out, open(error_file_path, "a") as f_err:
@@ -127,14 +129,7 @@ async def process_batch_in_background(batch_id: str):
             if batch.status == "cancelling":
                 break
             
-            if isinstance(result, asyncio.TimeoutError):
-                batch.request_counts.failed += 1
-                error_entry = {
-                    "custom_id": req.custom_id,
-                    "response": {"status_code": 504, "body": "Request timed out"}
-                }
-                f_err.write(json.dumps(error_entry) + "\n")
-            elif isinstance(result, Exception):
+            if isinstance(result, Exception):
                 batch.request_counts.failed += 1
                 error_entry = {
                     "custom_id": req.custom_id,
@@ -152,6 +147,13 @@ async def process_batch_in_background(batch_id: str):
                     }
                     f_out.write(json.dumps(response_entry) + "\n")
                     batch.request_counts.completed += 1
+
+                    # Aggregate token usage if provided by vLLM
+                    if isinstance(body, dict):
+                        usage = body.get("usage") or {}
+                        if isinstance(usage, dict):
+                            batch.usage["prompt_tokens"] = batch.usage.get("prompt_tokens", 0) + int(usage.get("prompt_tokens", 0))
+                            batch.usage["completion_tokens"] = batch.usage.get("completion_tokens", 0) + int(usage.get("completion_tokens", 0))
                 else:
                     error_entry = {
                         "custom_id": req.custom_id,

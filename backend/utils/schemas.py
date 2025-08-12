@@ -13,6 +13,7 @@ class ChatCompletionRequest(BaseModel):
     n: Optional[int] = 1
     max_tokens: Optional[int] = 256
     stream: Optional[bool] = False
+    stream_options: Optional[Dict[str, Any]] = None
     stop: Optional[List[str]] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
@@ -52,6 +53,7 @@ class Batch(BaseModel):
     cancelling_at: Optional[int] = None
     cancelled_at: Optional[int] = None
     request_counts: BatchRequestCounts = Field(default_factory=BatchRequestCounts)
+    usage: Optional[Dict[str, int]] = Field(default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0})
     metadata: Optional[Dict[str, str]] = None
 
 class BatchCreate(BaseModel):
