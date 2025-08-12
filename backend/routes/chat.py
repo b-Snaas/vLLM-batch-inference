@@ -65,14 +65,12 @@ async def chat_completions(request: ChatCompletionRequest):
             media_type="text/event-stream"
         )
     else:
-        # For non-streaming, use the high-priority queue
         vllm_request = VLLMRequest(
             request_body=request.model_dump(exclude_none=True)
         )
         await high_priority_queue.put(vllm_request)
         
         try:
-            # Wait for the result from the consumer
             result = await asyncio.wait_for(vllm_request.future, timeout=180)
             return JSONResponse(content=result["body"], status_code=result["status_code"])
         except asyncio.TimeoutError:
