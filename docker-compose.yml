@@ -32,4 +32,5 @@ services:
 networks:
   default:
     name: prosus_net
+    external: true
 
