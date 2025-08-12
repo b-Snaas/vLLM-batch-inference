@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    # Ensure GPU access
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    shm_size: 16g
+    entrypoint: ["/bin/bash", "/start.sh"]
+    command: []
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./compose/vllm/start.sh:/start.sh:ro
+      - ${HF_HOME:-/root/.cache/huggingface}:/root/.cache/huggingface
+
+  backend:  # Phase 2: FastAPI gateway (OpenAI-compatible proxy + auth)
+    build: ./compose/backend
+    depends_on:
+      - vllm
+    environment:
+      - VLLM_URL=http://vllm:8000
+      - API_TOKEN=your_secret_token_here
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+
+networks:
+  default:
+    name: prosus_net
+

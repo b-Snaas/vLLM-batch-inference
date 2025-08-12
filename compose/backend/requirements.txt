@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+aiohttp
+python-dotenv
+transformers
+starlette
+
