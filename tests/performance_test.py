@@ -5,7 +5,7 @@ import os
 import json
 
 API_BASE_URL = "http://127.0.0.1:3000"
-API_KEY = "your_api_key"
+API_KEY = "123"
 DATASET_PATH = "dataset.jsonl"
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}"
