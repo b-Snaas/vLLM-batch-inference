@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from utils.schemas import ChatCompletionRequest
 from utils.truncation import truncate_messages, MAX_INPUT_LENGTH
 from utils.config import VLLM_URL
+from utils.vllm_queue import high_priority_queue, VLLMRequest
 
 router = APIRouter()
 
@@ -64,15 +65,15 @@ async def chat_completions(request: ChatCompletionRequest):
             media_type="text/event-stream"
         )
     else:
-        async with aiohttp.ClientSession() as session:
-            vllm_endpoint = f"{VLLM_URL}/v1/chat/completions"
-            payload = request.model_dump(exclude_none=True)
-
-            try:
-                async with session.post(vllm_endpoint, json=payload, timeout=180) as resp:
-                    response_json = await resp.json()
-                    return JSONResponse(content=response_json, status_code=resp.status)
-            except aiohttp.ClientConnectorError:
-                raise HTTPException(status_code=503, detail="Could not connect to vLLM service.")
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=504, detail="Request to vLLM timed out.")
+        # For non-streaming, use the high-priority queue
+        vllm_request = VLLMRequest(
+            request_body=request.model_dump(exclude_none=True)
+        )
+        await high_priority_queue.put(vllm_request)
+        
+        try:
+            # Wait for the result from the consumer
+            result = await asyncio.wait_for(vllm_request.future, timeout=180)
+            return JSONResponse(content=result["body"], status_code=result["status_code"])
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Request timed out while waiting in the queue.")

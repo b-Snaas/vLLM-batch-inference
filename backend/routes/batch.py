@@ -1,5 +1,4 @@
 import asyncio
-import aiohttp
 import json
 import uuid
 import os
@@ -10,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from utils.schemas import Batch, FileObject, BatchCreate
 from utils.config import VLLM_URL
+from utils.vllm_queue import low_priority_queue, VLLMRequest
 
 
 router = APIRouter()
@@ -64,98 +64,116 @@ async def process_batch_in_background(batch_id: str):
     output_file_path = os.path.join(FILES_DIR, output_file_id)
     error_file_path = os.path.join(FILES_DIR, error_file_id)
 
-    # 2. Read input file and process requests
+    # 2. Read input file and prepare requests
+    requests_to_process = []
     try:
-        with open(input_file_path, "r") as f_in, \
-             open(output_file_path, "w") as f_out, \
-             open(error_file_path, "w") as f_err:
+        with open(input_file_path, "r") as f_in:
+            for i, line in enumerate(f_in):
+                try:
+                    request_data = json.loads(line)
+                    messages = request_data.get("messages", [])
+                    system_message = next((msg for msg in messages if msg.get("role") == "system"), None)
+                    user_message = next((msg for msg in messages if msg.get("role") == "user"), None)
 
-            async with aiohttp.ClientSession() as session:
-                for line in f_in:
-                    # Check for cancellation
-                    if batch.status == "cancelling":
-                        batch.status = "cancelled"
-                        batch.cancelled_at = int(datetime.now().timestamp())
-                        # Clean up empty files if no processing happened
-                        if batch.request_counts.total == 0:
-                            os.remove(output_file_path)
-                            os.remove(error_file_path)
-                        return
+                    if not system_message or not user_message:
+                        raise ValueError("Missing system or user message in the input data.")
 
-                    batch.request_counts.total += 1
-                    try:
-                        request_data = json.loads(line)
-                        
-                        # Extract messages and find the template and data
-                        messages = request_data.get("messages", [])
-                        system_message = next((msg for msg in messages if msg.get("role") == "system"), None)
-                        user_message = next((msg for msg in messages if msg.get("role") == "user"), None)
+                    template = system_message.get("content", "")
+                    data = user_message.get("content", "")
+                    
+                    final_content = template.replace("<user_profile>", data).replace("<system_info>", "")
+                    final_message = {"role": "system", "content": final_content}
+                    
+                    custom_id = f"request-{i+1}"
+                    request_body = {
+                        "model": "qwen3-4b",
+                        "messages": [final_message]
+                    }
+                    
+                    vllm_request = VLLMRequest(
+                        custom_id=custom_id,
+                        request_body=request_body,
+                        vllm_endpoint=batch.endpoint
+                    )
+                    requests_to_process.append(vllm_request)
 
-                        if not system_message or not user_message:
-                            raise ValueError("Missing system or user message in the input data.")
-
-                        # Extract placeholders and their values
-                        template = system_message.get("content", "")
-                        data = user_message.get("content", "")
-                        
-                        # Simple string replacement for placeholders
-                        final_content = template.replace("<user_profile>", data).replace("<system_info>", "")
-
-                        # Construct the new message
-                        final_message = {"role": "system", "content": final_content}
-                        
-                        custom_id = f"request-{batch.request_counts.total}"
-                        
-                        # Construct the request body for the chat completion
-                        request_body = {
-                            "model": "qwen3-4b",
-                            "messages": [final_message]
-                        }
-                        
-                        endpoint = batch.endpoint
-
-                        # 3. Send request to vLLM
-                        vllm_full_url = f"{VLLM_URL}{endpoint}"
-                        async with session.post(vllm_full_url, json=request_body, timeout=180) as resp:
-                            response_body = await resp.json()
-                            if resp.status == 200:
-                                # 4. Write successful response
-                                result = {
-                                    "custom_id": custom_id,
-                                    "response": {
-                                        "status_code": resp.status,
-                                        "body": response_body
-                                    }
-                                }
-                                f_out.write(json.dumps(result) + "\n")
-                                batch.request_counts.completed += 1
-                            else:
-                                # 5. Write error response
-                                error_result = {
-                                    "custom_id": custom_id,
-                                    "response": {
-                                        "status_code": resp.status,
-                                        "body": response_body
-                                    }
-                                }
-                                f_err.write(json.dumps(error_result) + "\n")
-                                batch.request_counts.failed += 1
-
-                    except json.JSONDecodeError as e:
-                        batch.request_counts.failed += 1
-                        error_result = {"error": f"JSON decode error: {e}"}
-                        f_err.write(json.dumps(error_result) + "\n")
-                    except Exception as e:
-                        batch.request_counts.failed += 1
-                        error_result = {"error": f"An unexpected error occurred: {e}"}
+                except (json.JSONDecodeError, ValueError) as e:
+                    # Tally and log invalid lines but don't stop processing
+                    batch.request_counts.failed += 1
+                    with open(error_file_path, "a") as f_err:
+                        error_result = {"error": f"Error processing line {i+1}: {e}"}
                         f_err.write(json.dumps(error_result) + "\n")
 
-        # 6. Finalize batch
+    except Exception as e:
+        batch.status = "failed"
+        batch.failed_at = int(datetime.now().timestamp())
+        batch.errors = {"code": "500", "message": f"Failed to read or parse input file: {e}"}
+        return
+
+
+    batch.request_counts.total = len(requests_to_process)
+
+    # 3. Queue all requests
+    for req in requests_to_process:
+        await low_priority_queue.put(req)
+
+    # 4. Process results as they complete
+    with open(output_file_path, "w") as f_out, open(error_file_path, "a") as f_err:
+        for req in requests_to_process:
+            # Check for cancellation
+            if batch.status == "cancelling":
+                # We don't remove the future from the queue, just ignore its result
+                continue
+            
+            try:
+                # Wait for the result from the consumer
+                result = await asyncio.wait_for(req.future, timeout=180) 
+                
+                status_code = result.get("status_code")
+                body = result.get("body")
+
+                if status_code == 200:
+                    response_entry = {
+                        "custom_id": req.custom_id,
+                        "response": {"status_code": status_code, "body": body}
+                    }
+                    f_out.write(json.dumps(response_entry) + "\n")
+                    batch.request_counts.completed += 1
+                else:
+                    error_entry = {
+                        "custom_id": req.custom_id,
+                        "response": {"status_code": status_code, "body": body}
+                    }
+                    f_err.write(json.dumps(error_entry) + "\n")
+                    batch.request_counts.failed += 1
+
+            except asyncio.TimeoutError:
+                batch.request_counts.failed += 1
+                error_entry = {
+                    "custom_id": req.custom_id,
+                    "response": {"status_code": 504, "body": "Request timed out"}
+                }
+                f_err.write(json.dumps(error_entry) + "\n")
+            except Exception as e:
+                batch.request_counts.failed += 1
+                error_entry = {
+                    "custom_id": req.custom_id,
+                    "response": {"status_code": 500, "body": f"An unexpected error occurred: {e}"}
+                }
+                f_err.write(json.dumps(error_entry) + "\n")
+
+    # 5. Finalize batch
+    if batch.status == "cancelling":
+        batch.status = "cancelled"
+        batch.cancelled_at = int(datetime.now().timestamp())
+    else:
         batch.status = "completed"
         batch.completed_at = int(datetime.now().timestamp())
-        batch.output_file_id = output_file_id
         
-        # Create FileObject for output file
+    batch.output_file_id = output_file_id
+    
+    # Create FileObject for output file
+    if os.path.exists(output_file_path) and os.path.getsize(output_file_path) > 0:
         files_db[output_file_id] = FileObject(
             id=output_file_id,
             bytes=os.path.getsize(output_file_path),
@@ -163,27 +181,24 @@ async def process_batch_in_background(batch_id: str):
             filename=f"{batch_id}_output.jsonl",
             purpose="batch_output"
         )
-        
-        if batch.request_counts.failed > 0:
-            batch.error_file_id = error_file_id
-            files_db[error_file_id] = FileObject(
-                id=error_file_id,
-                bytes=os.path.getsize(error_file_path),
-                created_at=int(datetime.now().timestamp()),
-                filename=f"{batch_id}_errors.jsonl",
-                purpose="batch_output"
-            )
-        else:
-             # If there are no errors, remove the empty error file
-            os.remove(error_file_path)
-
-    except Exception as e:
-        batch.status = "failed"
-        batch.failed_at = int(datetime.now().timestamp())
-        batch.errors = {"code": "500", "message": f"Batch processing failed: {e}"}
-        # Clean up files on catastrophic failure
+    else:
+        # If the file is empty (e.g., all requests failed), don't link it.
+        batch.output_file_id = None
         if os.path.exists(output_file_path):
-            os.remove(output_file_path)
+             os.remove(output_file_path)
+
+    # Create FileObject for error file
+    if os.path.exists(error_file_path) and os.path.getsize(error_file_path) > 0:
+        batch.error_file_id = error_file_id
+        files_db[error_file_id] = FileObject(
+            id=error_file_id,
+            bytes=os.path.getsize(error_file_path),
+            created_at=int(datetime.now().timestamp()),
+            filename=f"{batch_id}_errors.jsonl",
+            purpose="batch_output"
+        )
+    else:
+        batch.error_file_id = None
         if os.path.exists(error_file_path):
             os.remove(error_file_path)
 
