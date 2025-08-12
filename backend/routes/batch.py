@@ -85,8 +85,33 @@ async def process_batch_in_background(batch_id: str):
                     batch.request_counts.total += 1
                     try:
                         request_data = json.loads(line)
-                        custom_id = request_data.get("custom_id")
-                        request_body = request_data.get("body")
+                        
+                        # Extract messages and find the template and data
+                        messages = request_data.get("messages", [])
+                        system_message = next((msg for msg in messages if msg.get("role") == "system"), None)
+                        user_message = next((msg for msg in messages if msg.get("role") == "user"), None)
+
+                        if not system_message or not user_message:
+                            raise ValueError("Missing system or user message in the input data.")
+
+                        # Extract placeholders and their values
+                        template = system_message.get("content", "")
+                        data = user_message.get("content", "")
+                        
+                        # Simple string replacement for placeholders
+                        final_content = template.replace("<user_profile>", data).replace("<system_info>", "")
+
+                        # Construct the new message
+                        final_message = {"role": "system", "content": final_content}
+                        
+                        custom_id = f"request-{batch.request_counts.total}"
+                        
+                        # Construct the request body for the chat completion
+                        request_body = {
+                            "model": "qwen3-4b",
+                            "messages": [final_message]
+                        }
+                        
                         endpoint = batch.endpoint
 
                         # 3. Send request to vLLM

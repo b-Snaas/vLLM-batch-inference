@@ -4,7 +4,7 @@ import time
 import os
 import json
 
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = "http://127.0.0.1:3000"
 API_KEY = "your_api_key"
 DATASET_PATH = "dataset.jsonl"
 HEADERS = {
@@ -75,7 +75,7 @@ async def run_single_completions(session: aiohttp.ClientSession, stop_event: asy
     print("4. Running single-user completions on the side...")
     latencies = []
     payload = {
-        "model": "your-model-name", # Replace with your model name
+        "model": "qwen3-4b",
         "messages": [{"role": "user", "content": "Hello, how are you?"}],
         "max_tokens": 50
     }
