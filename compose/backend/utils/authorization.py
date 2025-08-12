@@ -2,7 +2,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.status import HTTP_401_UNAUTHORIZED
 
-from .config import API_TOKEN
+from utils.config import API_TOKEN
 
 async def auth_middleware(request: Request, call_next):
     if API_TOKEN:

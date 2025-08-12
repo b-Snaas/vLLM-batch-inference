@@ -1,6 +1,6 @@
 from fastapi import FastAPI
-from .routes import chat
-from .utils.authorization import auth_middleware
+from routes import chat
+from utils.authorization import auth_middleware
 
 app = FastAPI()
 

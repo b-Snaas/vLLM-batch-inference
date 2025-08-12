@@ -3,9 +3,9 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..utils.schemas import ChatCompletionRequest
-from ..utils.truncation import truncate_messages, MAX_INPUT_LENGTH
-from ..utils.config import VLLM_URL
+from utils.schemas import ChatCompletionRequest
+from utils.truncation import truncate_messages, MAX_INPUT_LENGTH
+from utils.config import VLLM_URL
 
 router = APIRouter()
 
